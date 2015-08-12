@@ -1,0 +1,6 @@
+recursive-include storageimage/static *
+recursive-include storageimage/templates *
+
+include LICENSE
+include README
+include *.txt

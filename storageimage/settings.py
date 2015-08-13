@@ -4,7 +4,7 @@ from django.conf import settings
 
 
 DEFAULT_SETTINGS = {
-    "BY_INJECTION": True
+    "AUTO_INJECTION": True,
 }
 
 USER_SETTINGS = DEFAULT_SETTINGS.copy()

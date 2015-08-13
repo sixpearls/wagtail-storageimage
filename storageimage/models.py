@@ -1,70 +1,69 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from django.db import models
+from django.db.models.fields.files import ImageFieldFile, ImageField 
+from django.utils.translation import ugettext_lazy as _
 from django.db.models.signals import pre_save, pre_delete
-from wagtail.wagtailimages.models import AbstractImage, AbstractRendition  \
-    get_upload_to, image_feature_detection, image_delete, rendition_delete \
-    Image as wtImage, Rendition as wtRendition, get_image_model
 from PIL import Image as PILImage
-
 from storageimage import settings
 
-class StorageImageFileDescriptor(models.fields.files.FileDescriptor):
-    """
-    Should this be a bugfix in Django? Original docstring and code below. When
-    using a remote storage file, for some reason the forced
-    update_dimension_fields on assignment were broken. Not sure if it's better
-    not to force it, or have the forced thing behave better?
-
-    Just like the FileDescriptor, but for ImageFields. The only difference is
-    assigning the width/height to the width_field/height_field, if appropriate.
-    
-    def __set__(self, instance, value):
-        previous_file = instance.__dict__.get(self.field.name)
-        super(ImageFileDescriptor, self).__set__(instance, value)
-
-        # To prevent recalculating image dimensions when we are instantiating
-        # an object from the database (bug #11084), only update dimensions if
-        # the field had a value before this assignment.  Since the default
-        # value for FileField subclasses is an instance of field.attr_class,
-        # previous_file will only be None when we are called from
-        # Model.__init__().  The ImageField.update_dimension_fields method
-        # hooked up to the post_init signal handles the Model.__init__() cases.
-        # Assignment happening outside of Model.__init__() will trigger the
-        # update right here.
-        if previous_file is not None:
-            self.field.update_dimension_fields(instance, force=True)
-    """
-
-class StorageImageFieldFile(models.fields.files.ImageFieldFile):
+class StorageImageFieldFile(ImageFieldFile):
     def _get_image_dimensions(self):
-        # over-write so that it can actually read .width and .height of
-        # a remote file
-        pass
+        # needs to be re-written to actually cache me.
+        if not hasattr(self, '_dimensions_cache'):
+            close = self.file.closed
+            if close:
+                self.file.open()
+            else:
+                file_pos = self.file.tell()
+            self.file.read() # load the data from remote source
 
-class StorageImageField(models.fields.files.ImageField):
+            img_pil = PILImage.open(self.file.file)
+            self._dimensions_cache = img_pil.size
+
+            if close:
+                self.file.close()
+            else:
+                self.file.seek(file_pos)
+        return self._dimensions_cache
+
+class StorageImageField(ImageField):
     attr_class = StorageImageFieldFile
 
-if settings.BY_INJECTION:
-    from wagtail.wagtailimages.models import get_image_model
+def storage_save(self,*args,**kwargs):
+    fix_save = True
+    if self.pk:
+        instance_ref = self.__class__.objects.get(pk=self.pk)
+        if instance_ref.file == self.file: 
+            # This is a bad way of checking if the file changed...
+            fix_save = False
+    if fix_save:
+        avail_name = get_upload_to(self, self.file.name)
+        reopen = not self.file.file.closed
+        if reopen:
+            file_loc = self.file.file.tell()
+        stored = self.file.storage.save(name=avail_name, content=self.file.file)
+        self.file = self.file.storage.open(stored)
+        if reopen:
+            self.file.file.open()
+            self.file.file.seek(file_loc)
+    super(self.__class__, self).save(*args,**kwargs)
+
+
+if settings.AUTO_INJECTION:
+    from wagtail.wagtailimages.models import get_image_model, get_upload_to
+
     ImageModel = get_image_model()
+    for i,f in enumerate(ImageModel._meta.local_fields):
+        if f.name == 'file':
+            del ImageModel._meta.local_fields[i]
+            break
+    StorageImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height').contribute_to_class(ImageModel, 'file')
+    ImageModel.save = storage_save
+
     RenditionModel = get_image_model().renditions.related.model
-    ImageModel.file = StorageImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height')
-    RenditionModel.file = StorageImageField(upload_to='images', width_field='width', height_field='height')
-else:
-    class Image(AbstractImage):
-        file = StorageImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height')
-        admin_form_fields = wtImage.admin_form_fields
-
-    class Rendition(AbstractRendition):
-        image = models.ForeignKey(Image, related_name='renditions')
-        file = StorageImageField(upload_to='images', width_field='width', height_field='height')
-        
-        class Meta:
-            unique_together = (
-                ('image', 'filter', 'focal_point_key'),
-            )
-
-    pre_save.connect(image_feature_detection, sender=Image)
-    pre_delete.connect(image_delete, sender=Image)
-    pre_delete.connect(rendition_delete, sender=Rendition)
+    for i,f in enumerate(RenditionModel._meta.local_fields):
+        if f.name == 'file':
+            del RenditionModel._meta.local_fields[i]
+            break
+    StorageImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height').contribute_to_class(RenditionModel, 'file')
+    RenditionModel.save = storage_save
